@@ -76,19 +76,17 @@ def clean_data(df):
     - Estandariza formatos de texto (mayúsculas/minúsculas) para consistencia.
     """
     try:
-        # 1. Crear una copia para evitar advertencias de SettingWithCopyWarning
+        # 1. Crear una copia
         df_clean = df.copy()
 
-        # 2. Eliminar duplicados (Requisito de la prueba)
-        # Nos basamos en 'transaction_id' como clave única.
+        # 2. Eliminar duplicados
         df_clean.drop_duplicates(subset=['transaction_id'], keep='first', inplace=True)
 
-        # 3. Manejar valores nulos (según nuestro diagnóstico)
+        # 3. Manejar valores nulos
         df_clean['three_ds_verified'] = df_clean['three_ds_verified'].fillna(False)
         df_clean['ip_address'] = df_clean['ip_address'].fillna('Unknown')
 
         # 4. Validar y convertir tipos de datos (Fechas)
-        # 'errors=coerce' convierte los nulos (de transacciones 'declined') en NaT (Not a Time).
         df_clean['timestamp'] = pd.to_datetime(df_clean['timestamp'])
         df_clean['settlement_date'] = pd.to_datetime(df_clean['settlement_date'], errors='coerce')
 
@@ -96,23 +94,22 @@ def clean_data(df):
         df_clean['three_ds_verified'] = df_clean['three_ds_verified'].astype(bool)
         df_clean['is_international'] = df_clean['is_international'].astype(bool)
 
-        # 6. Estandarizar formatos de texto (Requisito de la prueba)
+        # 6. Estandarizar formatos de texto
         text_cols_to_lower = ['status', 'payment_method', 'category', 'device_type']
         text_cols_to_upper = ['currency', 'country']
-
         for col in text_cols_to_lower:
-            if col in df_clean.columns:
-                df_clean[col] = df_clean[col].str.lower()
-                
+            if col in df_clean.columns: df_clean[col] = df_clean[col].str.lower()
         for col in text_cols_to_upper:
-            if col in df_clean.columns:
-                df_clean[col] = df_clean[col].str.upper()
+            if col in df_clean.columns: df_clean[col] = df_clean[col].str.upper()
+
+        # 7. Manejar outliers en 'amount' (Requisito de la prueba)
+        # Nos aseguramos de que todos los montos sean positivos.
+        df_clean['amount'] = df_clean['amount'].abs()
 
         return df_clean
 
     except Exception as e:
         print(f"ERROR: Error durante la limpieza de datos: {e}")
-        # Retornar un dataframe vacío si la limpieza falla
         return pd.DataFrame(columns=df.columns)
 
     raise NotImplementedError("clean_data() function needs to be implemented")
@@ -153,59 +150,50 @@ def detect_suspicious_transactions(df):
     """
     try:
         # 0. Definir umbrales y listas de riesgo
-        AMOUNT_THRESHOLD = 1000  # Umbral para montos "inusualmente altos"
-        ATTEMPT_THRESHOLD = 3    # Más de 3 intentos fallidos es sospechoso
-        SECURITY_KEYWORDS = ['security', 'fraud', 'stolen', 'lost card'] # Palabras clave de fraude
+        AMOUNT_THRESHOLD = 1000
+        ATTEMPT_THRESHOLD = 3
+        SECURITY_KEYWORDS = ['security', 'fraud', 'stolen', 'lost card']
+        HIGH_FREQ_THRESHOLD = 5  # (Nueva Regla) Más de 5 tx del mismo user en 1 min
 
-        # 1. Crear una copia para trabajar
+        # 1. Crear una copia y la columna de razón
         df_processed = df.copy()
-        
-        # 2. Crear la columna de razón (inicia vacía)
         df_processed['suspicion_reason'] = None
 
         # --- Aplicación de Reglas ---
-        # Usamos .loc para asignar la razón de forma eficiente
-
         # Regla 1: Montos Inusualmente Altos
-        df_processed.loc[
-            df_processed['amount'] > AMOUNT_THRESHOLD, 
-            'suspicion_reason'
-        ] = 'Monto inusualmente alto'
-
+        df_processed.loc[df_processed['amount'] > AMOUNT_THRESHOLD, 'suspicion_reason'] = 'Monto inusualmente alto'
         # Regla 2: Múltiples Intentos Fallidos
-        df_processed.loc[
-            df_processed['attempt_number'] > ATTEMPT_THRESHOLD, 
-            'suspicion_reason'
-        ] = 'Múltiples intentos fallidos'
-
+        df_processed.loc[df_processed['attempt_number'] > ATTEMPT_THRESHOLD, 'suspicion_reason'] = 'Múltiples intentos fallidos'
         # Regla 3: Declinadas por Seguridad
         df_processed.loc[
             (df_processed['status'] == 'declined') & 
             (df_processed['response_message'].str.contains('|'.join(SECURITY_KEYWORDS), case=False, na=False)),
             'suspicion_reason'
         ] = 'Declinada por violación de seguridad'
-
         # Regla 4: Internacionales de Alto Riesgo
         df_processed.loc[
-            (df_processed['is_international'] == True) & 
-            (df_processed['amount'] > AMOUNT_THRESHOLD),
+            (df_processed['is_international'] == True) & (df_processed['amount'] > AMOUNT_THRESHOLD),
             'suspicion_reason'
         ] = 'Internacional de alto valor'
+        
+        # [NUEVA] Regla 5: Patrón Anómalo (Usuario de Alta Frecuencia)
+        user_tx_counts = df_processed['user_id'].value_counts()
+        high_freq_users = user_tx_counts[user_tx_counts > HIGH_FREQ_THRESHOLD].index
+        df_processed.loc[
+            df_processed['user_id'].isin(high_freq_users),
+            'suspicion_reason'
+        ] = 'Patrón anómalo (alta frecuencia de usuario)'
 
         # 3. Separar los DataFrames
         suspicious_mask = df_processed['suspicion_reason'].notnull()
         df_suspicious = df_processed[suspicious_mask]
         df_normal = df_processed[~suspicious_mask]
-
-        # Opcional: Eliminar la columna 'suspicion_reason' del df_normal si no se quiere
         df_normal = df_normal.drop(columns=['suspicion_reason'])
 
         return df_normal, df_suspicious
 
     except Exception as e:
         print(f"ERROR: Error durante la detección de sospechosas: {e}")
-        # Si falla la detección, asumimos que todo es normal para no detener el pipeline
-        # pero devolvemos un df sospechoso vacío.
         return df, pd.DataFrame(columns=df.columns)
 
     raise NotImplementedError("detect_suspicious_transactions() function needs to be implemented")
