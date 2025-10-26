@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  # --- Servicio de Base de Datos (Fase 3) ---
+  postgres:
+    image: postgres:15-alpine
+    container_name: fintech_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: fintech_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # --- Servicio de Data Lake S3 (Fase 1 Extra) ---
+  minio:
+    image: minio/minio
+    container_name: fintech_minio
+    restart: always
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadminpassword
+    ports:
+      - "9000:9000"  # Puerto de la API
+      - "9001:9001"  # Puerto de la consola web
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+
+# --- Volúmenes (para persistir los datos) ---
+volumes:
+  postgres_data:
+  minio_data:

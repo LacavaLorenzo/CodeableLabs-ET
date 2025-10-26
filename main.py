@@ -14,14 +14,33 @@ import pandas as pd
 from datetime import datetime
 from pathlib import Path
 from scripts.generate_transactions import generate_transactions
+import s3fs  # [CAMBIO] Importamos la librería para S3
+import warnings
 
 
-# Configuration
-TRANSACTIONS_FOLDER = Path("./transactions")
-PROCESSED_FOLDER = Path("./processed")
-SUSPICIOUS_FOLDER = Path("./suspicious")
-INTERVAL_SECONDS = 60  # Generate transactions every 1 minute
-TRANSACTIONS_PER_BATCH = 100  # Number of transactions to generate each time
+# [CAMBIO] Usamos nombres de buckets en lugar de carpetas
+TRANSACTIONS_BUCKET = "transactions"
+PROCESSED_BUCKET = "processed"
+SUSPICIOUS_BUCKET = "suspicious"
+
+# [CAMBIO] Configuración de S3 (MinIO)
+# s3fs (y pandas) esperan 'key' y 'secret' como argumentos directos,
+# y 'endpoint_url' debe ir dentro de 'client_kwargs'.
+MINIO_STORAGE_OPTIONS = {
+    "key": "minioadmin",
+    "secret": "minioadminpassword",
+    "client_kwargs": {"endpoint_url": "http://localhost:9000"}
+}
+# [CAMBIO] Creamos un sistema de archivos S3
+# Usamos ** para desempaquetar el diccionario (key=..., secret=..., client_kwargs=...)
+fs = s3fs.S3FileSystem(**MINIO_STORAGE_OPTIONS)
+
+INTERVAL_SECONDS = 60  # Generar transacciones cada 1 minuto
+TRANSACTIONS_PER_BATCH = 100  # Número de transacciones a generar cada vez
+
+# Ignoramos warnings de S3FS y Pandas que no son críticos
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', message=".*deprecated.*")
 
 
 def setup_folders():
@@ -35,17 +54,48 @@ def setup_folders():
     print(f"  - Suspicious: {SUSPICIOUS_FOLDER}")
 
 
-def generate_batch():
-    """Generate a batch of fake transactions and save to data lake"""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = TRANSACTIONS_FOLDER / f"transactions_{timestamp}.csv"
+def setup_minio_buckets():
+    """
+    [CAMBIO] Verifica y crea buckets en MinIO si no existen
+    """
+    print("--- Configurando Infraestructura (MinIO) ---")
+    try:
+        for bucket in [TRANSACTIONS_BUCKET, PROCESSED_BUCKET, SUSPICIOUS_BUCKET]:
+            if not fs.exists(bucket):
+                fs.mkdir(bucket)
+                print(f"Bucket '{bucket}' creado en MinIO.")
+            else:
+                print(f"Bucket '{bucket}' ya existe.")
+        print("Buckets de MinIO configurados correctamente.")
+    except Exception as e:
+        print(f"ERROR: No se pudo conectar o crear buckets en MinIO: {e}")
+        print("Asegúrate de que el contenedor Docker de MinIO ('fintech_minio') esté corriendo.")
+        raise e
 
+
+def generate_batch():
+    """
+    [CAMBIO] Genera un lote de transacciones y lo guarda en MinIO
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # [CAMBIO] Definimos la ruta del archivo en S3
+    s3_path = f"{TRANSACTIONS_BUCKET}/transactions_{timestamp}.csv"
+    
     print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Generating {TRANSACTIONS_PER_BATCH} transactions...")
     df = generate_transactions(TRANSACTIONS_PER_BATCH)
-    df.to_csv(filename, index=False)
-    print(f"Saved to: {filename}")
-
-    return filename
+    
+    try:
+        # [CAMBIO] Escribimos el CSV directamente a S3 (MinIO)
+        with fs.open(s3_path, 'w') as f:
+            df.to_csv(f, index=False)
+            
+        print(f"Saved to S3 Data Lake: s3://{s3_path}")
+        return s3_path # Devolvemos la ruta S3
+        
+    except Exception as e:
+        print(f"ERROR: No se pudo escribir en el bucket S3 '{TRANSACTIONS_BUCKET}': {e}")
+        return None
 
 
 def clean_data(df):
@@ -76,43 +126,25 @@ def clean_data(df):
     - Estandariza formatos de texto (mayúsculas/minúsculas) para consistencia.
     """
     try:
-        # 1. Crear una copia
         df_clean = df.copy()
-
-        # 2. Eliminar duplicados
         df_clean.drop_duplicates(subset=['transaction_id'], keep='first', inplace=True)
-
-        # 3. Manejar valores nulos
         df_clean['three_ds_verified'] = df_clean['three_ds_verified'].fillna(False)
         df_clean['ip_address'] = df_clean['ip_address'].fillna('Unknown')
-
-        # 4. Validar y convertir tipos de datos (Fechas)
         df_clean['timestamp'] = pd.to_datetime(df_clean['timestamp'])
         df_clean['settlement_date'] = pd.to_datetime(df_clean['settlement_date'], errors='coerce')
-
-        # 5. Validar y convertir tipos de datos (Booleanos)
         df_clean['three_ds_verified'] = df_clean['three_ds_verified'].astype(bool)
         df_clean['is_international'] = df_clean['is_international'].astype(bool)
-
-        # 6. Estandarizar formatos de texto
         text_cols_to_lower = ['status', 'payment_method', 'category', 'device_type']
         text_cols_to_upper = ['currency', 'country']
         for col in text_cols_to_lower:
             if col in df_clean.columns: df_clean[col] = df_clean[col].str.lower()
         for col in text_cols_to_upper:
             if col in df_clean.columns: df_clean[col] = df_clean[col].str.upper()
-
-        # 7. Manejar outliers en 'amount' (Requisito de la prueba)
-        # Nos aseguramos de que todos los montos sean positivos.
         df_clean['amount'] = df_clean['amount'].abs()
-
         return df_clean
-
     except Exception as e:
         print(f"ERROR: Error durante la limpieza de datos: {e}")
         return pd.DataFrame(columns=df.columns)
-
-    raise NotImplementedError("clean_data() function needs to be implemented")
 
 
 def detect_suspicious_transactions(df):
@@ -149,55 +181,37 @@ def detect_suspicious_transactions(df):
         tuple: (df_normal, df_suspicious) - DataFrames separados.
     """
     try:
-        # 0. Definir umbrales y listas de riesgo
         AMOUNT_THRESHOLD = 1000
         ATTEMPT_THRESHOLD = 3
         SECURITY_KEYWORDS = ['security', 'fraud', 'stolen', 'lost card']
-        HIGH_FREQ_THRESHOLD = 5  # (Nueva Regla) Más de 5 tx del mismo user en 1 min
-
-        # 1. Crear una copia y la columna de razón
+        HIGH_FREQ_THRESHOLD = 5
         df_processed = df.copy()
         df_processed['suspicion_reason'] = None
-
-        # --- Aplicación de Reglas ---
-        # Regla 1: Montos Inusualmente Altos
         df_processed.loc[df_processed['amount'] > AMOUNT_THRESHOLD, 'suspicion_reason'] = 'Monto inusualmente alto'
-        # Regla 2: Múltiples Intentos Fallidos
         df_processed.loc[df_processed['attempt_number'] > ATTEMPT_THRESHOLD, 'suspicion_reason'] = 'Múltiples intentos fallidos'
-        # Regla 3: Declinadas por Seguridad
         df_processed.loc[
             (df_processed['status'] == 'declined') & 
             (df_processed['response_message'].str.contains('|'.join(SECURITY_KEYWORDS), case=False, na=False)),
             'suspicion_reason'
         ] = 'Declinada por violación de seguridad'
-        # Regla 4: Internacionales de Alto Riesgo
         df_processed.loc[
             (df_processed['is_international'] == True) & (df_processed['amount'] > AMOUNT_THRESHOLD),
             'suspicion_reason'
         ] = 'Internacional de alto valor'
-        
-        # [NUEVA] Regla 5: Patrón Anómalo (Usuario de Alta Frecuencia)
         user_tx_counts = df_processed['user_id'].value_counts()
         high_freq_users = user_tx_counts[user_tx_counts > HIGH_FREQ_THRESHOLD].index
         df_processed.loc[
             df_processed['user_id'].isin(high_freq_users),
             'suspicion_reason'
         ] = 'Patrón anómalo (alta frecuencia de usuario)'
-
-        # 3. Separar los DataFrames
         suspicious_mask = df_processed['suspicion_reason'].notnull()
         df_suspicious = df_processed[suspicious_mask]
         df_normal = df_processed[~suspicious_mask]
         df_normal = df_normal.drop(columns=['suspicion_reason'])
-
         return df_normal, df_suspicious
-
     except Exception as e:
         print(f"ERROR: Error durante la detección de sospechosas: {e}")
         return df, pd.DataFrame(columns=df.columns)
-
-    raise NotImplementedError("detect_suspicious_transactions() function needs to be implemented")
-
 
 def process_batch(raw_file):
     """
@@ -207,35 +221,44 @@ def process_batch(raw_file):
         raw_file (Path): Path to the raw transaction CSV file
     """
     try:
-        # Read raw data from data lake
-        print(f"Reading data from: {raw_file}")
-        df_raw = pd.read_csv(raw_file)
+        # [CORRECCIÓN 1] Construimos la ruta S3 completa
+        # Usamos la variable 'raw_file' (que es el argumento)
+        full_s3_path = f"s3://{raw_file}"
+        
+        print(f"Reading data from Data Lake: {full_s3_path}")
+        
+        # [CORRECCIÓN 2] Usamos MINIO_STORAGE_OPTIONS (no MINIO_CONFIG)
+        df_raw = pd.read_csv(full_s3_path, storage_options=MINIO_STORAGE_OPTIONS)
         print(f"Loaded {len(df_raw)} transactions")
 
-        # Step 1: Clean the data
+        # --- Pasos 1 y 2 (Sin cambios en la lógica) ---
         print("Cleaning data...")
         df_clean = clean_data(df_raw)
         print(f"Cleaned {len(df_clean)} transactions")
 
-        # Step 2: Detect suspicious transactions
         print("Detecting suspicious transactions...")
         df_normal, df_suspicious = detect_suspicious_transactions(df_clean)
         print(f"Found {len(df_suspicious)} suspicious transactions")
         print(f"Found {len(df_normal)} normal transactions")
 
-        # Save processed results
+        # --- Guardar resultados en MinIO S3 ---
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         if len(df_normal) > 0:
-            normal_file = PROCESSED_FOLDER / f"processed_{timestamp}.csv"
-            df_normal.to_csv(normal_file, index=False)
-            print(f"Saved normal transactions to: {normal_file}")
+            normal_s3_path = f"s3://{PROCESSED_BUCKET}/processed_{timestamp}.csv"
+            # [CORRECCIÓN 3] Usamos MINIO_STORAGE_OPTIONS
+            df_normal.to_csv(normal_s3_path, index=False, storage_options=MINIO_STORAGE_OPTIONS)
+            print(f"Saved normal transactions to S3: {normal_s3_path}")
 
         if len(df_suspicious) > 0:
-            suspicious_file = SUSPICIOUS_FOLDER / f"suspicious_{timestamp}.csv"
-            df_suspicious.to_csv(suspicious_file, index=False)
-            print(f"WARNING: Saved suspicious transactions to: {suspicious_file}")
+            suspicious_s3_path = f"s3://{SUSPICIOUS_BUCKET}/suspicious_{timestamp}.csv"
+            # [CORRECCIÓN 4] Usamos MINIO_STORAGE_OPTIONS
+            df_suspicious.to_csv(suspicious_s3_path, index=False, storage_options=MINIO_STORAGE_OPTIONS)
+            print(f"WARNING: Saved suspicious transactions to S3: {suspicious_s3_path}")
 
+        # [CAMBIO] TODO Fase 3: Aquí iría la carga al Data Warehouse
+        # load_to_dwh(df_normal, db_engine) 
+        
         print(f"Batch processing completed successfully")
 
     except NotImplementedError as e:
@@ -245,18 +268,22 @@ def process_batch(raw_file):
 
 
 def main():
-    """Main loop - generates and processes transactions every minute"""
+    """Main loop - genera y procesa transacciones cada minuto"""
     print("="*60)
-    print("Transaction Processing Pipeline")
+    print("Transaction Processing Pipeline (v2 - S3 Data Lake)")
     print("="*60)
 
-    setup_folders()
+    try:
+        # [CAMBIO] Reemplazamos setup_folders por setup_minio_buckets
+        setup_minio_buckets()
+    except Exception as e:
+        print("Pipeline detenido. No se pudo inicializar la infraestructura.")
+        return
 
     print(f"\nStarting continuous processing (every {INTERVAL_SECONDS} seconds)")
     print("Press Ctrl+C to stop\n")
 
     batch_count = 0
-
     try:
         while True:
             batch_count += 1
@@ -264,13 +291,14 @@ def main():
             print(f"BATCH #{batch_count}")
             print(f"{'='*60}")
 
-            # Generate new transactions
-            raw_file = generate_batch()
+            # 1. Genera nuevas transacciones y las guarda en S3
+            s3_raw_file = generate_batch()
 
-            # Process the batch
-            process_batch(raw_file)
+            # 2. Procesa el lote desde S3 y guarda resultados en S3
+            if s3_raw_file:
+                process_batch(s3_raw_file)
 
-            # Wait for next interval
+            # 3. Espera para el siguiente lote
             print(f"\nWaiting {INTERVAL_SECONDS} seconds until next batch...")
             time.sleep(INTERVAL_SECONDS)
 
