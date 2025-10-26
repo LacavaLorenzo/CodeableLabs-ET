@@ -65,11 +65,55 @@ def clean_data(df):
     Returns:
         pd.DataFrame: Cleaned transaction data
     """
-    # YOUR CODE HERE
-    # Example structure:
-    # df_clean = df.copy()
-    # ... your cleaning logic ...
-    # return df_clean
+    """
+    Limpia y valida los datos crudos de transacciones.
+    
+    Aplica las siguientes reglas basadas en el análisis EDA (EDA_Limpieza_Fraude.ipynb):
+    - Elimina duplicados basados en 'transaction_id'.
+    - Rellena valores nulos (NaN) en 'three_ds_verified' (como False) e 'ip_address' (como 'Unknown').
+    - Convierte 'timestamp' y 'settlement_date' a formato datetime.
+    - Asegura que 'three_ds_verified' e 'is_international' sean booleanos.
+    - Estandariza formatos de texto (mayúsculas/minúsculas) para consistencia.
+    """
+    try:
+        # 1. Crear una copia para evitar advertencias de SettingWithCopyWarning
+        df_clean = df.copy()
+
+        # 2. Eliminar duplicados (Requisito de la prueba)
+        # Nos basamos en 'transaction_id' como clave única.
+        df_clean.drop_duplicates(subset=['transaction_id'], keep='first', inplace=True)
+
+        # 3. Manejar valores nulos (según nuestro diagnóstico)
+        df_clean['three_ds_verified'] = df_clean['three_ds_verified'].fillna(False)
+        df_clean['ip_address'] = df_clean['ip_address'].fillna('Unknown')
+
+        # 4. Validar y convertir tipos de datos (Fechas)
+        # 'errors=coerce' convierte los nulos (de transacciones 'declined') en NaT (Not a Time).
+        df_clean['timestamp'] = pd.to_datetime(df_clean['timestamp'])
+        df_clean['settlement_date'] = pd.to_datetime(df_clean['settlement_date'], errors='coerce')
+
+        # 5. Validar y convertir tipos de datos (Booleanos)
+        df_clean['three_ds_verified'] = df_clean['three_ds_verified'].astype(bool)
+        df_clean['is_international'] = df_clean['is_international'].astype(bool)
+
+        # 6. Estandarizar formatos de texto (Requisito de la prueba)
+        text_cols_to_lower = ['status', 'payment_method', 'category', 'device_type']
+        text_cols_to_upper = ['currency', 'country']
+
+        for col in text_cols_to_lower:
+            if col in df_clean.columns:
+                df_clean[col] = df_clean[col].str.lower()
+                
+        for col in text_cols_to_upper:
+            if col in df_clean.columns:
+                df_clean[col] = df_clean[col].str.upper()
+
+        return df_clean
+
+    except Exception as e:
+        print(f"ERROR: Error durante la limpieza de datos: {e}")
+        # Retornar un dataframe vacío si la limpieza falla
+        return pd.DataFrame(columns=df.columns)
 
     raise NotImplementedError("clean_data() function needs to be implemented")
 
