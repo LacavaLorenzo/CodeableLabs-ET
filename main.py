@@ -136,13 +136,77 @@ def detect_suspicious_transactions(df):
     Returns:
         tuple: (normal_df, suspicious_df) - DataFrames split by suspicion status
     """
-    # YOUR CODE HERE
-    # Example structure:
-    # df['is_suspicious'] = False
-    # ... your detection logic ...
-    # suspicious_df = df[df['is_suspicious'] == True]
-    # normal_df = df[df['is_suspicious'] == False]
-    # return normal_df, suspicious_df
+    """
+    Identifica transacciones sospechosas basadas en un conjunto de reglas de negocio.
+    
+    Aplica las siguientes reglas (basadas en EDA_Limpieza_Fraude.ipynb):
+    - Montos inusualmente altos (superiores a AMOUNT_THRESHOLD).
+    - Múltiples intentos fallidos (superiores a ATTEMPT_THRESHOLD).
+    - Transacciones declinadas por motivos de seguridad (contienen SECURITY_KEYWORDS).
+    - Transacciones internacionales de alto valor.
+    
+    Args:
+        df (pd.DataFrame): DataFrame de transacciones limpias.
+
+    Returns:
+        tuple: (df_normal, df_suspicious) - DataFrames separados.
+    """
+    try:
+        # 0. Definir umbrales y listas de riesgo
+        AMOUNT_THRESHOLD = 1000  # Umbral para montos "inusualmente altos"
+        ATTEMPT_THRESHOLD = 3    # Más de 3 intentos fallidos es sospechoso
+        SECURITY_KEYWORDS = ['security', 'fraud', 'stolen', 'lost card'] # Palabras clave de fraude
+
+        # 1. Crear una copia para trabajar
+        df_processed = df.copy()
+        
+        # 2. Crear la columna de razón (inicia vacía)
+        df_processed['suspicion_reason'] = None
+
+        # --- Aplicación de Reglas ---
+        # Usamos .loc para asignar la razón de forma eficiente
+
+        # Regla 1: Montos Inusualmente Altos
+        df_processed.loc[
+            df_processed['amount'] > AMOUNT_THRESHOLD, 
+            'suspicion_reason'
+        ] = 'Monto inusualmente alto'
+
+        # Regla 2: Múltiples Intentos Fallidos
+        df_processed.loc[
+            df_processed['attempt_number'] > ATTEMPT_THRESHOLD, 
+            'suspicion_reason'
+        ] = 'Múltiples intentos fallidos'
+
+        # Regla 3: Declinadas por Seguridad
+        df_processed.loc[
+            (df_processed['status'] == 'declined') & 
+            (df_processed['response_message'].str.contains('|'.join(SECURITY_KEYWORDS), case=False, na=False)),
+            'suspicion_reason'
+        ] = 'Declinada por violación de seguridad'
+
+        # Regla 4: Internacionales de Alto Riesgo
+        df_processed.loc[
+            (df_processed['is_international'] == True) & 
+            (df_processed['amount'] > AMOUNT_THRESHOLD),
+            'suspicion_reason'
+        ] = 'Internacional de alto valor'
+
+        # 3. Separar los DataFrames
+        suspicious_mask = df_processed['suspicion_reason'].notnull()
+        df_suspicious = df_processed[suspicious_mask]
+        df_normal = df_processed[~suspicious_mask]
+
+        # Opcional: Eliminar la columna 'suspicion_reason' del df_normal si no se quiere
+        df_normal = df_normal.drop(columns=['suspicion_reason'])
+
+        return df_normal, df_suspicious
+
+    except Exception as e:
+        print(f"ERROR: Error durante la detección de sospechosas: {e}")
+        # Si falla la detección, asumimos que todo es normal para no detener el pipeline
+        # pero devolvemos un df sospechoso vacío.
+        return df, pd.DataFrame(columns=df.columns)
 
     raise NotImplementedError("detect_suspicious_transactions() function needs to be implemented")
 
