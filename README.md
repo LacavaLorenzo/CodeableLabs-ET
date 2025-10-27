@@ -69,7 +69,7 @@ El desafío principal de esta prueba era la **gestión del tiempo** y la **prior
 
 ## 3. Diseño del Data Warehouse (Esquema Estrella)
 
-![Arquitectura del Pipeline](img/star_schema.png)
+![StarSchema](img/star_schema.png)
 
 ### `fact_transactions` (Tabla de Hechos)
 
