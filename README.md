@@ -1,6 +1,6 @@
 # Prueba Técnica - Data Engineer (Fintech)
 
-![Portada](img\portada.jpg)
+![Portada](img/portada.jpg)
 
 ## Resumen del Proyecto
 
@@ -8,7 +8,7 @@ Este repositorio contiene la solución a la prueba técnica de Data Engineer. El
 
 El sistema completo está orquestado con **Docker Compose** y sigue el siguiente flujo:
 
-![Arquitectura del Pipeline](img\diagrama_arquitectura.png)
+![Arquitectura del Pipeline](img/diagrama_arquitectura.png)
 
 1. Un script de Python (`main.py`) genera transacciones y las ingiere en un **Data Lake S3 (MinIO)**.
 2. El mismo script procesa los datos crudos del Data Lake: los limpia, valida y aplica reglas de negocio para **detectar fraudes**.
@@ -69,7 +69,7 @@ El desafío principal de esta prueba era la **gestión del tiempo** y la **prior
 
 ## 3. Diseño del Data Warehouse (Esquema Estrella)
 
-![Arquitectura del Pipeline](img\star_schema.png)
+![Arquitectura del Pipeline](img/star_schema.png)
 
 ### `fact_transactions` (Tabla de Hechos)
 
